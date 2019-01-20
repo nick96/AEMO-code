@@ -1,3 +1,39 @@
+Set-StrictMode -Version 2
+
+function Get-AEMOService
+{
+    $rand = Get-Random
+    switch ($rand % 3)
+    {
+        0
+        {
+            return @{test = $true}
+        }
+        1
+        {
+            throw "Access is denied"
+        }
+        2
+        {
+            throw "other"
+        }
+    }
+}
+
+function Test-Connection
+{
+    # return @{test = $true}
+    $rand = Get-Random
+    if ($rand % 2 -eq 0)
+    {
+        return @{}
+    }
+    else
+    {
+        throw "not found"
+    }
+}
+
 function Test-ServicesConfigFile
 {
     [CmdletBinding()]
@@ -7,7 +43,7 @@ function Test-ServicesConfigFile
         [string[]]
         $ConfigPath,
         # Schema file to check the config files against
-        [Parameter(Mandatory)]
+        [Parameter()]
         [string]
         $SchemaPath,
         [Parameter()]
@@ -26,7 +62,7 @@ function Test-ServicesConfigFile
         $rpt = @()
         foreach ($config in $ConfigPath)
         {
-            $cfg = Get-Content -Path $config | ConvertTo-Json -Depth 3
+            $cfg = Get-Content -Path $config | ConvertFrom-Json
             $domain = $cfg.domain
 
             $cfgRpt = @{
@@ -36,40 +72,43 @@ function Test-ServicesConfigFile
             foreach ($host in $cfg.hosts)
             {
                 $hostRpt = $null
-                $conn = Test-Connection -ComputerName $host.name
-                if ($null -ne $conn)
+                try
                 {
-                    $hostRpt = [PSCustomObject]@{
-                        HostName      = $host.name
-                        HostAvailable = $true
-                        Servies       = @()
-                    }
-                    foreach ($displayName in $host.ServiceDisplayNames)
+                    $conn = Test-Connection -ComputerName $host.name
+                    if ($null -ne $conn)
                     {
-                        $serviceRpt = @{
-                            ServiceDisplayName = $service.DisplayName
+                        $hostRpt = [PSCustomObject]@{
+                            HostName      = $host.name
+                            HostAvailable = $true
+                            Services      = @()
                         }
-                        try
+                        foreach ($displayName in $host.ServiceDisplayNames)
                         {
-                            $service = Get-AEMOService -DisplayNamePattern $displayName -HostPattern $host.name -Domain $domain
-                            $serviceRpt.ServiceAvailable = $true
-                        }
-                        catch
-                        {
-                            $serviceRpt.ServiceAvailable = $false
-                            if ($PSItem.Exception.Message.ToLower().Contains("Access is denied".ToLower()))
-                            {
-                                $serviceRpt.Reason = "Access is denied"
+                            $serviceRpt = @{
+                                ServiceDisplayName = $displayName
                             }
-                            else
+                            try
                             {
-                                $serviceRpt.Reason = "Service does not exist"
+                                Get-AEMOService -DisplayNamePattern $displayName -HostPattern $host.name -Domain $domain | Out-Null
+                                $serviceRpt.ServiceAvailable = $true
                             }
+                            catch
+                            {
+                                $serviceRpt.ServiceAvailable = $false
+                                if ($PSItem.Exception.Message.ToLower().Contains("Access is denied".ToLower()))
+                                {
+                                    $serviceRpt.Reason = "Access is denied"
+                                }
+                                else
+                                {
+                                    $serviceRpt.Reason = "Service does not exist"
+                                }
+                            }
+                            $hostRpt.Services += [pscustomobject]$serviceRpt
                         }
-                        $hostRpt.Services += [pscustomobject]$serviceRpt
                     }
                 }
-                else
+                catch
                 {
                     $hostRpt = [PSCustomObject]@{
                         HostName      = $host.name
@@ -77,44 +116,60 @@ function Test-ServicesConfigFile
                     }
                 }
                 $cfgRpt.Hosts += $hostRpt
+
             }
             $rpt += $cfgRpt
         }
 
         foreach ($cfgRpt in $rpt)
         {
-            $hostsCount = $cfgRpt.Length
+            $hostsCount = 0
+            $hostIssuesCount = 0
             $servicesCount = 0
-            $issuesCount = 0
+            $serviceIssuesCount = 0
 
             Write-Host "Config: $($cfgRpt.Path)"
             foreach ($hostRpt in $cfgRpt.Hosts)
             {
-                $hostOk = ($null -eq ($hostRpt.Services | Where-Object { -not $_.ServiceAvailable }))
-                $serviceCount = $hostRpt.Servies.Length
-                $issuesCount = ($hostRpt.Services | Where-Object { -not $_.ServiceAvailable }).Length
+                if (-not $hostRpt.HostAvailable)
+                {
+                    Write-Host "    [-] $($hostRpt.HostName): Not found" -ForegroundColor Red
+                    $hostIssuesCount += 1
+                    continue
+                }
+                else
+                {
+                    $hostsCount += 1
+                }
 
-                $servicesCount += $hostRpt.Services.Length
+                $hostOk = ($null -eq ($hostRpt.Services | Where-Object { -not $_.ServiceAvailable }))
 
                 if (-not $hostOk)
                 {
-                    Write-Host "    [-] $($hostRpt.HostName): $issuesCount/$serviceCount issues found" -ForegroundColor Red
+                    $totalServices = $hostRpt.Services.Length
+                    $issuesCount = ($hostRpt.Services | Where-Object { -not $_.ServiceAvailable } | Measure-Object).Count
+                    Write-Host "    [-] $($hostRpt.HostName): $issuesCount/$totalServices issues found" -ForegroundColor Red
                     foreach ($serviceRpt in $hostRpt.Services)
                     {
-                        if ($serviceRpt.ServiceAvailable -and $Full)
+                        if ($serviceRpt.ServiceAvailable)
                         {
-                            Write-Host "        [+] $($serviceRpt.ServiceDisplayName)" -ForegroundColor Green
+                            if ($Full)
+                            {
+                                Write-Host "        [+] $($serviceRpt.ServiceDisplayName)" -ForegroundColor Green
+                            }
+                            $servicesCount += 1
                         }
                         else
                         {
                             Write-Host "        [-] $($serviceRpt.ServiceDisplayName): $($serviceRpt.Reason)" -ForegroundColor Red
-                            $issuesCount += 1
+                            $serviceIssuesCount += 1
                         }
                     }
                 }
             }
 
-            Write-Host "Hosts: $hostsCount, Services: $servicesCount, Issues: $issuesCount"
+            Write-Host "Hosts: $hostsCount available, $hostIssuesCount unavailable"
+            Write-Host "Services: $servicesCount available, $serviceIssuesCount unavailable"
         }
     }
 
